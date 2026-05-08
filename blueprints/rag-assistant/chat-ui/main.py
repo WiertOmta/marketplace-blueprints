@@ -6,19 +6,23 @@ The app self-discovers the agent's deployment URL and API key at startup
 using the DO API.
 
 Environment variables (injected by terraform via App Platform):
-    AGENT_UUID   — UUID of the managed agent
-    DO_API_TOKEN — DigitalOcean API token
-    AGENT_NAME   — Display name of the agent (optional)
+    AGENT_UUID         — UUID of the managed agent
+    DO_API_TOKEN       — DigitalOcean API token
+    AGENT_NAME         — Display name of the agent (optional)
+    CHAT_AUTH_USERNAME — Username for HTTP Basic Auth (optional; auth disabled if unset)
+    CHAT_AUTH_PASSWORD — Password for HTTP Basic Auth (optional; auth disabled if unset)
 """
 
 import logging
 import os
+import secrets
 import sys
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger("chat-ui")
@@ -29,6 +33,30 @@ AGENT_UUID = os.environ["AGENT_UUID"]
 DO_API_TOKEN = os.environ["DO_API_TOKEN"]
 AGENT_NAME = os.environ.get("AGENT_NAME", "RAG Assistant")
 DO_API_BASE = os.environ.get("DO_API_BASE", "https://api.digitalocean.com")
+CHAT_AUTH_USERNAME = os.environ.get("CHAT_AUTH_USERNAME", "")
+CHAT_AUTH_PASSWORD = os.environ.get("CHAT_AUTH_PASSWORD", "")
+AUTH_ENABLED = bool(CHAT_AUTH_USERNAME and CHAT_AUTH_PASSWORD)
+if not AUTH_ENABLED:
+    logger.warning("CHAT_AUTH_USERNAME/CHAT_AUTH_PASSWORD not set — chat UI is unauthenticated")
+
+security = HTTPBasic(auto_error=False)
+
+
+def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
+    if not AUTH_ENABLED:
+        return
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": 'Basic realm="RAG Assistant"'},
+    )
+    if credentials is None:
+        raise unauthorized
+    # secrets.compare_digest avoids leaking timing information.
+    user_ok = secrets.compare_digest(credentials.username.encode("utf-8"), CHAT_AUTH_USERNAME.encode("utf-8"))
+    pass_ok = secrets.compare_digest(credentials.password.encode("utf-8"), CHAT_AUTH_PASSWORD.encode("utf-8"))
+    if not (user_ok and pass_ok):
+        raise unauthorized
 
 # Populated at startup.
 AGENT_ENDPOINT = None
@@ -83,7 +111,7 @@ async def startup_event():
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
+async def index(_: None = Depends(require_auth)):
     """Serve the chat UI."""
     return INDEX_HTML.replace("{{AGENT_NAME}}", AGENT_NAME)
 
@@ -94,7 +122,7 @@ async def health():
 
 
 @app.post("/api/chat")
-async def chat(request: Request):
+async def chat(request: Request, _: None = Depends(require_auth)):
     """Proxy a chat message to the managed agent and return the response."""
     if not AGENT_ENDPOINT or not AGENT_API_KEY:
         return JSONResponse(status_code=503, content={"error": "Agent not ready"})

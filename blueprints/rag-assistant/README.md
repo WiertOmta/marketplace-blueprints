@@ -84,6 +84,8 @@ Use the chat interface to ask questions. The assistant will search your knowledg
 | `guardrail_jailbreak_uuid` | `""` | UUID of the jailbreak detection guardrail |
 | `guardrail_content_mod_uuid` | `""` | UUID of the content moderation guardrail |
 | `guardrail_sensitive_data_uuid` | `""` | UUID of the sensitive data detection guardrail |
+| `chat_auth_username` | *(required)* | Username for HTTP Basic Auth on the chat UI |
+| `chat_auth_password` | *(required)* | Password for HTTP Basic Auth on the chat UI (sensitive) |
 
 ## Terraform outputs
 
@@ -127,6 +129,8 @@ pip install -r requirements.txt
 export AGENT_UUID=<your-agent-uuid>
 export DO_API_TOKEN=<your-token>
 export AGENT_NAME="RAG Assistant"
+export CHAT_AUTH_USERNAME=<your-username>
+export CHAT_AUTH_PASSWORD=<your-password>
 uvicorn main:app --host 0.0.0.0 --port 8080
 ```
 
@@ -134,5 +138,6 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 
 - The `do_token` variable is marked as sensitive and will not appear in Terraform plan output.
 - The agent API key is injected as a `SECRET` environment variable in App Platform.
+- The chat UI is protected by HTTP Basic Auth via `chat_auth_username` and `chat_auth_password`. The browser prompts for credentials on first visit and reuses them for subsequent requests. Always serve the UI over HTTPS so the basic-auth header is encrypted in transit (App Platform terminates TLS by default).
 - Guardrails provide defense-in-depth against prompt injection, toxic content, and PII leakage.
 - The chat UI does not store conversation history server-side; all history is held in the browser session.

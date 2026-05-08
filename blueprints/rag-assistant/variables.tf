@@ -80,7 +80,7 @@ variable "app_instance_size" {
 
 variable "_app_source_repo" {
   type        = string
-  default     = "digitalocean/marketplace-blueprints"
+  default     = "WiertOmta/marketplace-blueprints"
   description = "GitHub repo for the app source code."
 }
 
@@ -88,6 +88,21 @@ variable "_app_source_branch" {
   type        = string
   default     = "master"
   description = "Git branch for the app source code."
+}
+
+// =============================================================================
+// CHAT UI AUTH CONFIGURATION
+// =============================================================================
+
+variable "chat_auth_username" {
+  type        = string
+  description = "Username for HTTP Basic Auth on the chat UI."
+}
+
+variable "chat_auth_password" {
+  type        = string
+  description = "Password for HTTP Basic Auth on the chat UI."
+  sensitive   = true
 }
 
 // =============================================================================

@@ -53,6 +53,19 @@ resource "digitalocean_app" "chat_ui" {
         value = digitalocean_gradientai_agent.rag_agent.name
         scope = "RUN_TIME"
       }
+
+      env {
+        key   = "CHAT_AUTH_USERNAME"
+        value = var.chat_auth_username
+        scope = "RUN_TIME"
+      }
+
+      env {
+        key   = "CHAT_AUTH_PASSWORD"
+        value = var.chat_auth_password
+        scope = "RUN_TIME"
+        type  = "SECRET"
+      }
     }
   }
 }
