@@ -143,6 +143,69 @@
     }
     .message.user .bubble { background: var(--do-blue); color: white; border-bottom-right-radius: 4px; }
     .message.assistant .bubble { background: var(--do-white); color: var(--do-gray-900); border: 1px solid var(--do-gray-200); border-bottom-left-radius: 4px; box-shadow: var(--do-shadow); }
+
+    /* Markdown rendering inside assistant bubbles */
+    .message.assistant .bubble.markdown { white-space: normal; }
+    .message.assistant .bubble.markdown > *:first-child { margin-top: 0; }
+    .message.assistant .bubble.markdown > *:last-child { margin-bottom: 0; }
+    .message.assistant .bubble.markdown p { margin: 0 0 8px; }
+    .message.assistant .bubble.markdown ul,
+    .message.assistant .bubble.markdown ol { margin: 0 0 8px; padding-left: 22px; }
+    .message.assistant .bubble.markdown li { margin: 2px 0; }
+    .message.assistant .bubble.markdown li > p { margin: 0; }
+    .message.assistant .bubble.markdown code {
+      background: var(--do-gray-100);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 13px;
+    }
+    .message.assistant .bubble.markdown pre {
+      background: var(--do-gray-100);
+      padding: 10px 12px;
+      border-radius: var(--do-radius);
+      overflow-x: auto;
+      margin: 8px 0;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .message.assistant .bubble.markdown pre code { background: transparent; padding: 0; font-size: 13px; }
+    .message.assistant .bubble.markdown blockquote {
+      margin: 0 0 8px;
+      padding: 4px 12px;
+      border-left: 3px solid var(--do-gray-200);
+      color: var(--do-gray-700);
+    }
+    .message.assistant .bubble.markdown a { color: var(--do-blue); text-decoration: underline; }
+    .message.assistant .bubble.markdown h1,
+    .message.assistant .bubble.markdown h2,
+    .message.assistant .bubble.markdown h3,
+    .message.assistant .bubble.markdown h4,
+    .message.assistant .bubble.markdown h5,
+    .message.assistant .bubble.markdown h6 {
+      margin: 12px 0 6px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+    .message.assistant .bubble.markdown h1 { font-size: 18px; }
+    .message.assistant .bubble.markdown h2 { font-size: 17px; }
+    .message.assistant .bubble.markdown h3 { font-size: 16px; }
+    .message.assistant .bubble.markdown h4,
+    .message.assistant .bubble.markdown h5,
+    .message.assistant .bubble.markdown h6 { font-size: 14px; }
+    .message.assistant .bubble.markdown table {
+      border-collapse: collapse;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+    .message.assistant .bubble.markdown th,
+    .message.assistant .bubble.markdown td {
+      border: 1px solid var(--do-gray-200);
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .message.assistant .bubble.markdown th { background: var(--do-gray-50); font-weight: 600; }
+    .message.assistant .bubble.markdown hr { border: none; border-top: 1px solid var(--do-gray-200); margin: 12px 0; }
     .typing-dots { display: inline-flex; gap: 4px; padding: 4px 0; }
     .typing-dots span {
       width: 6px; height: 6px;
@@ -192,6 +255,8 @@
     .send-btn svg { width: 18px; height: 18px; fill: currentColor; }
     .input-hint { font-size: 11px; color: var(--do-gray-300); margin-top: 6px; text-align: center; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
 <body>
   <header>
@@ -259,6 +324,29 @@
     const sendBtn = document.getElementById('send');
     let history = [];
 
+    if (typeof marked !== 'undefined') {
+      marked.setOptions({ breaks: true, gfm: true });
+    }
+    if (typeof DOMPurify !== 'undefined') {
+      // Force external links to open in a new tab.
+      DOMPurify.addHook('afterSanitizeAttributes', function (node) {
+        if (node.tagName === 'A') {
+          node.setAttribute('target', '_blank');
+          node.setAttribute('rel', 'noopener noreferrer');
+        }
+      });
+    }
+
+    function renderMarkdown(text) {
+      if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') return null;
+      try {
+        return DOMPurify.sanitize(marked.parse(text || ''));
+      } catch (e) {
+        console.error('Markdown render failed:', e);
+        return null;
+      }
+    }
+
     textarea.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = Math.min(this.scrollHeight, 120) + 'px';
@@ -319,7 +407,13 @@
       avatar.textContent = role === 'user' ? 'Y' : 'AI';
       const bubble = document.createElement('div');
       bubble.className = 'bubble' + (isError ? ' error-bubble' : '');
-      bubble.textContent = text;
+      const html = (role === 'assistant' && !isError) ? renderMarkdown(text) : null;
+      if (html !== null) {
+        bubble.classList.add('markdown');
+        bubble.innerHTML = html;
+      } else {
+        bubble.textContent = text;
+      }
       div.appendChild(avatar);
       div.appendChild(bubble);
       chatInner.appendChild(div);
