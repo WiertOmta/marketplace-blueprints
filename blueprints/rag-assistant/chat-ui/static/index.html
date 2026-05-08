@@ -206,6 +206,25 @@
     }
     .message.assistant .bubble.markdown th { background: var(--do-gray-50); font-weight: 600; }
     .message.assistant .bubble.markdown hr { border: none; border-top: 1px solid var(--do-gray-200); margin: 12px 0; }
+
+    /* Sources block at the bottom of an assistant message */
+    .sources {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--do-gray-200);
+      font-size: 12px;
+    }
+    .sources-title {
+      font-weight: 600;
+      color: var(--do-gray-500);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .sources ol { margin: 0; padding-left: 22px; }
+    .sources li { margin: 2px 0; color: var(--do-gray-700); }
+    .sources a { color: var(--do-blue); text-decoration: none; }
+    .sources a:hover { text-decoration: underline; }
     .typing-dots { display: inline-flex; gap: 4px; padding: 4px 0; }
     .typing-dots span {
       width: 6px; height: 6px;
@@ -347,6 +366,49 @@
       }
     }
 
+    function preprocessCitations(text, sources) {
+      if (!Array.isArray(sources) || sources.length === 0) return text;
+      const urlByIndex = {};
+      for (const s of sources) {
+        if (s && s.url) urlByIndex[s.index] = s.url;
+      }
+      // Turn [[Cn]] into a clickable [Cn](url) markdown link when the URL is known.
+      // Angle-bracket URL form lets URLs containing parens/spaces work.
+      return text.replace(/\[\[C(\d+)\]\]/g, function (match, n) {
+        const url = urlByIndex[parseInt(n, 10)];
+        if (!url) return match;
+        return '[\\[C' + n + '\\]](<' + url + '>)';
+      });
+    }
+
+    function renderSourcesBlock(sources) {
+      if (!Array.isArray(sources) || sources.length === 0) return null;
+      const wrap = document.createElement('div');
+      wrap.className = 'sources';
+      const title = document.createElement('div');
+      title.className = 'sources-title';
+      title.textContent = 'Sources';
+      wrap.appendChild(title);
+      const ol = document.createElement('ol');
+      for (const s of sources) {
+        const li = document.createElement('li');
+        const label = (s && s.name) ? s.name : ('Source ' + (s && s.index));
+        if (s && s.url) {
+          const a = document.createElement('a');
+          a.href = s.url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = label;
+          li.appendChild(a);
+        } else {
+          li.textContent = label;
+        }
+        ol.appendChild(li);
+      }
+      wrap.appendChild(ol);
+      return wrap;
+    }
+
     textarea.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = Math.min(this.scrollHeight, 120) + 'px';
@@ -386,9 +448,10 @@
         const data = await res.json();
         const content = data.content || data.error || 'No response received.';
         const isError = !!data.error || res.status >= 400;
+        const sources = Array.isArray(data.sources) ? data.sources : [];
 
         typingEl.remove();
-        appendMessage('assistant', content, isError);
+        appendMessage('assistant', content, isError, sources);
         history.push({ role: 'assistant', content });
       } catch (err) {
         typingEl.remove();
@@ -399,7 +462,7 @@
       textarea.focus();
     }
 
-    function appendMessage(role, text, isError) {
+    function appendMessage(role, text, isError, sources) {
       const div = document.createElement('div');
       div.className = 'message ' + role;
       const avatar = document.createElement('div');
@@ -407,12 +470,18 @@
       avatar.textContent = role === 'user' ? 'Y' : 'AI';
       const bubble = document.createElement('div');
       bubble.className = 'bubble' + (isError ? ' error-bubble' : '');
-      const html = (role === 'assistant' && !isError) ? renderMarkdown(text) : null;
+      const renderable = role === 'assistant' && !isError;
+      const processed = renderable ? preprocessCitations(text, sources) : text;
+      const html = renderable ? renderMarkdown(processed) : null;
       if (html !== null) {
         bubble.classList.add('markdown');
         bubble.innerHTML = html;
       } else {
         bubble.textContent = text;
+      }
+      if (renderable) {
+        const sourcesEl = renderSourcesBlock(sources);
+        if (sourcesEl) bubble.appendChild(sourcesEl);
       }
       div.appendChild(avatar);
       div.appendChild(bubble);

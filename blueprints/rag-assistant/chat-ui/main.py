@@ -13,6 +13,7 @@ Environment variables (injected by terraform via App Platform):
     CHAT_AUTH_PASSWORD — Password for HTTP Basic Auth (optional; auth disabled if unset)
 """
 
+import json
 import logging
 import os
 import secrets
@@ -142,13 +143,16 @@ async def chat(request: Request, _: None = Depends(require_auth)):
         "Content-Type": "application/json",
     }
 
+    payload = {"messages": messages, "include_retrieval_info": True}
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(AGENT_ENDPOINT, json={"messages": messages}, headers=headers)
+        resp = await client.post(AGENT_ENDPOINT, json=payload, headers=headers)
 
     try:
         data = resp.json()
     except Exception:
         return JSONResponse(status_code=resp.status_code, content={"error": resp.text})
+
+    _log_response_shape(data)
 
     # Extract the response text from OpenAI-compatible format.
     content = ""
@@ -157,4 +161,72 @@ async def chat(request: Request, _: None = Depends(require_auth)):
     elif "detail" in data:
         content = f"Error: {data['detail']}"
 
-    return JSONResponse(content={"content": content, "usage": data.get("usage")})
+    sources = _extract_sources(data)
+
+    return JSONResponse(content={"content": content, "usage": data.get("usage"), "sources": sources})
+
+
+def _log_response_shape(data: dict) -> None:
+    """Log a small summary of the agent response so we can refine source extraction."""
+    try:
+        logger.info("Agent response top-level keys: %s", list(data.keys()))
+        for key in ("retrieval", "retrieved_data", "sources", "citations"):
+            if key in data:
+                logger.info("  %s: %s", key, json.dumps(data[key], default=str)[:1500])
+        choices = data.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            msg = choices[0].get("message", {}) or {}
+            logger.info("  choices[0].message keys: %s", list(msg.keys()))
+            for key in ("retrieval", "retrieved_data", "sources", "citations", "context"):
+                if key in msg:
+                    logger.info("  choices[0].message.%s: %s", key, json.dumps(msg[key], default=str)[:1500])
+    except Exception as e:
+        logger.warning("Failed to log response shape: %s", e)
+
+
+def _extract_sources(data: dict) -> list[dict]:
+    """Pull retrieval/citation entries out of the agent response. The exact
+    schema isn't pinned down, so try several common locations and field names."""
+    candidates: list = []
+
+    def find_in(obj):
+        if not isinstance(obj, dict):
+            return None
+        for key in ("retrieval", "sources", "citations", "context"):
+            val = obj.get(key)
+            if isinstance(val, dict):
+                for inner in ("retrieved_data", "documents", "sources", "citations", "items"):
+                    if isinstance(val.get(inner), list) and val[inner]:
+                        return val[inner]
+            elif isinstance(val, list) and val:
+                return val
+        return None
+
+    candidates = find_in(data) or []
+    if not candidates:
+        choices = data.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            candidates = find_in(choices[0].get("message") or {}) or []
+
+    sources: list[dict] = []
+    for idx, item in enumerate(candidates, start=1):
+        if not isinstance(item, dict):
+            continue
+        name = (
+            item.get("name")
+            or item.get("document_name")
+            or item.get("filename")
+            or item.get("file_name")
+            or item.get("title")
+            or item.get("source")
+            or f"Source {idx}"
+        )
+        url = (
+            item.get("url")
+            or item.get("download_url")
+            or item.get("source_url")
+            or item.get("file_url")
+            or item.get("link")
+        )
+        sources.append({"index": idx, "name": name, "url": url})
+    return sources
