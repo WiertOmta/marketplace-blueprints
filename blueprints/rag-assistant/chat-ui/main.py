@@ -170,16 +170,28 @@ def _log_response_shape(data: dict) -> None:
     """Log a small summary of the agent response so we can refine source extraction."""
     try:
         logger.info("Agent response top-level keys: %s", list(data.keys()))
-        for key in ("retrieval", "retrieved_data", "sources", "citations"):
-            if key in data:
-                logger.info("  %s: %s", key, json.dumps(data[key], default=str)[:1500])
+
+        retrieval = data.get("retrieval") or {}
+        if isinstance(retrieval, dict):
+            logger.info("  retrieval keys: %s", list(retrieval.keys()))
+            items = retrieval.get("retrieved_data") or []
+            if isinstance(items, list):
+                logger.info("  retrieved_data length: %d", len(items))
+                for ix, item in enumerate(items[:3]):
+                    if isinstance(item, dict):
+                        logger.info("    [%d] keys: %s", ix, list(item.keys()))
+                        for k, v in item.items():
+                            sample = json.dumps(v, default=str)
+                            logger.info("    [%d].%s: %s", ix, k, sample[:300])
+
+        citations = data.get("citations")
+        if citations is not None:
+            logger.info("  citations: %s", json.dumps(citations, default=str)[:500])
+
         choices = data.get("choices") or []
         if choices and isinstance(choices[0], dict):
             msg = choices[0].get("message", {}) or {}
             logger.info("  choices[0].message keys: %s", list(msg.keys()))
-            for key in ("retrieval", "retrieved_data", "sources", "citations", "context"):
-                if key in msg:
-                    logger.info("  choices[0].message.%s: %s", key, json.dumps(msg[key], default=str)[:1500])
     except Exception as e:
         logger.warning("Failed to log response shape: %s", e)
 
