@@ -221,7 +221,7 @@
       text-transform: uppercase;
       letter-spacing: 0.4px;
     }
-    .sources ol { margin: 0; padding-left: 22px; }
+    .sources ol, .sources ul { margin: 0; padding-left: 22px; }
     .sources li { margin: 2px 0; color: var(--do-gray-700); }
     .sources a { color: var(--do-blue); text-decoration: none; }
     .sources a:hover { text-decoration: underline; }
@@ -383,17 +383,29 @@
 
     function renderSourcesBlock(sources) {
       if (!Array.isArray(sources) || sources.length === 0) return null;
+      // Dedupe by URL (preferred) or display name. Multiple chunks often point
+      // at the same file; users care about the file, not each chunk.
+      const seen = new Set();
+      const unique = [];
+      for (const s of sources) {
+        if (!s) continue;
+        const key = s.url || s.name || '';
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        unique.push(s);
+      }
+      if (unique.length === 0) return null;
       const wrap = document.createElement('div');
       wrap.className = 'sources';
       const title = document.createElement('div');
       title.className = 'sources-title';
       title.textContent = 'Sources';
       wrap.appendChild(title);
-      const ol = document.createElement('ol');
-      for (const s of sources) {
+      const ul = document.createElement('ul');
+      for (const s of unique) {
         const li = document.createElement('li');
-        const label = (s && s.name) ? s.name : ('Source ' + (s && s.index));
-        if (s && s.url) {
+        const label = s.name || ('Source ' + s.index);
+        if (s.url) {
           const a = document.createElement('a');
           a.href = s.url;
           a.target = '_blank';
@@ -403,9 +415,9 @@
         } else {
           li.textContent = label;
         }
-        ol.appendChild(li);
+        ul.appendChild(li);
       }
-      wrap.appendChild(ol);
+      wrap.appendChild(ul);
       return wrap;
     }
 

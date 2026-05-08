@@ -6,14 +6,18 @@ The app self-discovers the agent's deployment URL and API key at startup
 using the DO API.
 
 Environment variables (injected by terraform via App Platform):
-    AGENT_UUID         — UUID of the managed agent
-    DO_API_TOKEN       — DigitalOcean API token
-    AGENT_NAME         — Display name of the agent (optional)
-    CHAT_AUTH_USERNAME — Username for HTTP Basic Auth (optional; auth disabled if unset)
-    CHAT_AUTH_PASSWORD — Password for HTTP Basic Auth (optional; auth disabled if unset)
+    AGENT_UUID               — UUID of the managed agent
+    DO_API_TOKEN             — DigitalOcean API token
+    AGENT_NAME               — Display name of the agent (optional)
+    CHAT_AUTH_USERNAME       — Username for HTTP Basic Auth (optional; auth disabled if unset)
+    CHAT_AUTH_PASSWORD       — Password for HTTP Basic Auth (optional; auth disabled if unset)
+    SPACES_BUCKET            — DO Spaces bucket holding the KB documents (optional)
+    SPACES_REGION            — Spaces region, e.g. ams3 / fra1 / nyc3 (optional)
+    SPACES_ACCESS_KEY_ID     — Spaces access key (optional)
+    SPACES_SECRET_ACCESS_KEY — Spaces secret key (optional)
+    SPACES_PRESIGN_TTL       — Presigned URL TTL in seconds (default 900)
 """
 
-import json
 import logging
 import os
 import secrets
@@ -39,6 +43,57 @@ CHAT_AUTH_PASSWORD = os.environ.get("CHAT_AUTH_PASSWORD", "")
 AUTH_ENABLED = bool(CHAT_AUTH_USERNAME and CHAT_AUTH_PASSWORD)
 if not AUTH_ENABLED:
     logger.warning("CHAT_AUTH_USERNAME/CHAT_AUTH_PASSWORD not set — chat UI is unauthenticated")
+
+SPACES_BUCKET = os.environ.get("SPACES_BUCKET", "")
+SPACES_REGION = os.environ.get("SPACES_REGION", "")
+SPACES_ACCESS_KEY_ID = os.environ.get("SPACES_ACCESS_KEY_ID", "")
+SPACES_SECRET_ACCESS_KEY = os.environ.get("SPACES_SECRET_ACCESS_KEY", "")
+SPACES_PRESIGN_TTL = int(os.environ.get("SPACES_PRESIGN_TTL", "900"))
+SPACES_ENABLED = bool(
+    SPACES_BUCKET and SPACES_REGION and SPACES_ACCESS_KEY_ID and SPACES_SECRET_ACCESS_KEY
+)
+
+s3_client = None
+if SPACES_ENABLED:
+    import boto3
+    from botocore.client import Config as BotoConfig
+
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=f"https://{SPACES_REGION}.digitaloceanspaces.com",
+        aws_access_key_id=SPACES_ACCESS_KEY_ID,
+        aws_secret_access_key=SPACES_SECRET_ACCESS_KEY,
+        region_name=SPACES_REGION,
+        config=BotoConfig(signature_version="s3v4"),
+    )
+    logger.info(
+        "Spaces presigning enabled (bucket=%s region=%s ttl=%ds)",
+        SPACES_BUCKET, SPACES_REGION, SPACES_PRESIGN_TTL,
+    )
+else:
+    logger.warning("SPACES_* env vars not all set — source download links will be omitted")
+
+
+def _presign_spaces_url(key: str) -> str | None:
+    """Generate a short-lived presigned GET URL for a Spaces object.
+
+    The chunk's `filename` field typically prepends the bucket name as a path
+    segment (e.g. 'uvsv-chatbot/foo/bar.docx' for bucket 'uvsv-chatbot'); strip
+    that segment if present so the S3 key is the actual object key.
+    """
+    if not s3_client or not key:
+        return None
+    if key.startswith(SPACES_BUCKET + "/"):
+        key = key[len(SPACES_BUCKET) + 1:]
+    try:
+        return s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": SPACES_BUCKET, "Key": key},
+            ExpiresIn=SPACES_PRESIGN_TTL,
+        )
+    except Exception as e:
+        logger.warning("Failed to presign URL for key %r: %s", key, e)
+        return None
 
 security = HTTPBasic(auto_error=False)
 
@@ -152,8 +207,6 @@ async def chat(request: Request, _: None = Depends(require_auth)):
     except Exception:
         return JSONResponse(status_code=resp.status_code, content={"error": resp.text})
 
-    _log_response_shape(data)
-
     # Extract the response text from OpenAI-compatible format.
     content = ""
     if "choices" in data and len(data["choices"]) > 0:
@@ -166,79 +219,32 @@ async def chat(request: Request, _: None = Depends(require_auth)):
     return JSONResponse(content={"content": content, "usage": data.get("usage"), "sources": sources})
 
 
-def _log_response_shape(data: dict) -> None:
-    """Log a small summary of the agent response so we can refine source extraction."""
-    try:
-        logger.info("Agent response top-level keys: %s", list(data.keys()))
-
-        retrieval = data.get("retrieval") or {}
-        if isinstance(retrieval, dict):
-            logger.info("  retrieval keys: %s", list(retrieval.keys()))
-            items = retrieval.get("retrieved_data") or []
-            if isinstance(items, list):
-                logger.info("  retrieved_data length: %d", len(items))
-                for ix, item in enumerate(items[:3]):
-                    if isinstance(item, dict):
-                        logger.info("    [%d] keys: %s", ix, list(item.keys()))
-                        for k, v in item.items():
-                            sample = json.dumps(v, default=str)
-                            logger.info("    [%d].%s: %s", ix, k, sample[:300])
-
-        citations = data.get("citations")
-        if citations is not None:
-            logger.info("  citations: %s", json.dumps(citations, default=str)[:500])
-
-        choices = data.get("choices") or []
-        if choices and isinstance(choices[0], dict):
-            msg = choices[0].get("message", {}) or {}
-            logger.info("  choices[0].message keys: %s", list(msg.keys()))
-    except Exception as e:
-        logger.warning("Failed to log response shape: %s", e)
-
-
 def _extract_sources(data: dict) -> list[dict]:
-    """Pull retrieval/citation entries out of the agent response. The exact
-    schema isn't pinned down, so try several common locations and field names."""
-    candidates: list = []
+    """Pull retrieval entries out of the agent response and presign download URLs.
 
-    def find_in(obj):
-        if not isinstance(obj, dict):
-            return None
-        for key in ("retrieval", "sources", "citations", "context"):
-            val = obj.get(key)
-            if isinstance(val, dict):
-                for inner in ("retrieved_data", "documents", "sources", "citations", "items"):
-                    if isinstance(val.get(inner), list) and val[inner]:
-                        return val[inner]
-            elif isinstance(val, list) and val:
-                return val
-        return None
-
-    candidates = find_in(data) or []
-    if not candidates:
-        choices = data.get("choices") or []
-        if choices and isinstance(choices[0], dict):
-            candidates = find_in(choices[0].get("message") or {}) or []
+    The agent returns chunks under data.retrieval.retrieved_data. Each item carries
+    a `filename` (Spaces object key, possibly bucket-prefixed) and a `metadata.item_name`
+    suitable for display.
+    """
+    retrieval = data.get("retrieval") or {}
+    items = retrieval.get("retrieved_data") if isinstance(retrieval, dict) else None
+    if not isinstance(items, list):
+        return []
 
     sources: list[dict] = []
-    for idx, item in enumerate(candidates, start=1):
+    for idx, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
-        name = (
-            item.get("name")
-            or item.get("document_name")
-            or item.get("filename")
-            or item.get("file_name")
-            or item.get("title")
-            or item.get("source")
+        filename = item.get("filename") or ""
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        display_name = (
+            metadata.get("item_name")
+            or (filename.rsplit("/", 1)[-1] if filename else None)
             or f"Source {idx}"
         )
-        url = (
-            item.get("url")
-            or item.get("download_url")
-            or item.get("source_url")
-            or item.get("file_url")
-            or item.get("link")
-        )
-        sources.append({"index": idx, "name": name, "url": url})
+        sources.append({
+            "index": idx,
+            "name": display_name,
+            "url": _presign_spaces_url(filename) if filename else None,
+        })
     return sources
